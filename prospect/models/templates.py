@@ -11,12 +11,18 @@ import os
 from . import priors
 from . import priors_beta
 from . import transforms
+import astropy.units as u
+from astropy.cosmology import z_at_value
+from astropy.cosmology import FlatLambdaCDM
+cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+
 
 __all__ = ["TemplateLibrary",
            "describe",
            "adjust_dirichlet_agebins",
            "adjust_continuity_agebins",
-           "adjust_stochastic_params"
+           "adjust_stochastic_params",
+           "adjust_dyn_stochastic_params"
            ]
 
 
@@ -152,6 +158,31 @@ def adjust_stochastic_params(parset, tuniv=13.7):
 
     return parset
 
+def adjust_dyn_stochastic_params(parset, tuniv=13.7):
+    
+    agebins = parset['agebins']['init']
+
+    z0, alpha = parset['zred']['init'], parset['alpha']['init']
+    lb_time_z0 = cosmo.lookback_time(z0).value * 1e9
+    bin_lb_times = lb_time_z0 + np.mean(10**agebins, axis=1)
+    zbins = z_at_value(cosmo.lookback_time, bin_lb_times*u.yr)
+    sfr_z = np.exp(-alpha*(zbins - z0)) * (1 + zbins)**(5/2)
+    baseline_sfr_ratios = np.log10(sfr_z[0:-1]/sfr_z[1::])
+    
+    ncomp = len(parset['agebins']['init'])
+    psd_params = [parset['sigma_reg']['init'], parset['tau_eq']['init'], parset['tau_in']['init'],
+                  parset['sigma_dyn']['init'], parset['tau_dyn']['init']]
+    sfr_covar = transforms.get_sfr_covar(psd_params, agebins=agebins)
+    sfr_ratio_covar = transforms.sfr_covar_to_sfr_ratio_covar(sfr_covar)
+    rprior = priors.MultiVariateNormal(mean=baseline_sfr_ratios, Sigma=sfr_ratio_covar)
+    
+    parset['mass']['N'] = ncomp
+    parset['agebins']['N'] = ncomp
+    parset["logsfr_ratios"]["N"] = ncomp - 1
+    parset["logsfr_ratios"]["init"] = baseline_sfr_ratios
+    parset["logsfr_ratios"]["prior"] = rprior
+
+    return parset
 
 TemplateLibrary = Directory()
 

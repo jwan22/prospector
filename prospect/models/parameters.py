@@ -16,6 +16,11 @@ from .templates import describe
 import scipy
 from gp_sfh import *
 import gp_sfh_kernels
+import astropy.units as u
+from astropy.cosmology import z_at_value
+from astropy.cosmology import FlatLambdaCDM
+cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+
 
 __all__ = ["ProspectorParams"]
 
@@ -191,6 +196,9 @@ class ProspectorParams(object):
         
         hyper_params = ['sigma_reg', 'tau_eq', 'tau_in', 'sigma_dyn', 'tau_dyn']
         psd_params = np.zeros(len(hyper_params))
+
+        dyn_base_sfh_params = ['zred', 'alpha']
+        dyn_base_params = np.zeros(len(dyn_base_sfh_params))
         
         if any(hp in self.theta_index.keys() for hp in hyper_params):
             for i, p in enumerate(hyper_params):
@@ -202,18 +210,45 @@ class ProspectorParams(object):
                     lnp_prior += this_prior
                 else:
                     psd_params[i] = self.config_dict[p]['init']
-                    
+
+            agebins = self.config_dict['agebins']['init']         
             sfr_covar_matrix = get_sfr_covar(psd_params, agebins=self.config_dict['agebins']['init'])
             sfr_ratio_covar_matrix = sfr_covar_to_sfr_ratio_covar(sfr_covar_matrix)
             nbins = len(self.config_dict['agebins']['init'])
-            logsfr_ratio_prior = scipy.stats.multivariate_normal(mean=[0.]*(nbins-1), cov=sfr_ratio_covar_matrix)
+
+            if ('alpha' in self.theta_index.keys()):
+                for i, p in enumerate(dyn_base_sfh_params):
+                    if self.config_dict[p]['isfree']:
+                        inds = self.theta_index[p]
+                        dyn_base_params[i] = theta[..., inds][0]
+                        func = self.config_dict[p]['prior']
+                        this_prior = np.sum(func(theta[..., inds]), axis=-1)
+                        lnp_prior += this_prior
+                    else:
+                        dyn_base_params[i] = self.config_dict[p]['init']
+                z0, alpha = dyn_base_params[0], dyn_base_params[1]
+                lb_time_z0 = cosmo.lookback_time(z0).value * 1e9
+                bin_lb_times = lb_time_z0 + np.mean(10**agebins, axis=1)
+                zbins = z_at_value(cosmo.lookback_time, bin_lb_times*u.yr)
+                sfr_z = np.exp(-alpha*(zbins - z0)) * (1 + zbins)**(5/2)
+                baseline_sfr_ratios = np.log10(sfr_z[0:-1]/sfr_z[1::])
+            else:
+                p = 'zred'
+                if self.config_dict[p]['isfree']:
+                    inds = self.theta_index[p]
+                    func = self.config_dict[p]['prior']
+                    this_prior = np.sum(func(theta[..., inds]), axis=-1)
+                    lnp_prior += this_prior
+                baseline_sfr_ratios = [0.] * (nbins-1)
+
+            logsfr_ratio_prior = scipy.stats.multivariate_normal(mean=baseline_sfr_ratios, cov=sfr_ratio_covar_matrix)
             inds = self.theta_index['logsfr_ratios']
             this_prior = np.sum(np.log(logsfr_ratio_prior.pdf(theta[..., inds])))
             #this_prior = np.sum(logsfr_ratio_prior(theta[..., inds]), axis=-1)
             lnp_prior += this_prior
         
             for k, inds in list(self.theta_index.items()):
-                if (k in hyper_params) or (k == 'logsfr_ratios'):
+                if (k in hyper_params) or (k == 'logsfr_ratios') or (k in dyn_base_sfh_params):
                     continue
                 func = self.config_dict[k]['prior']
                 this_prior = np.sum(func(theta[..., inds]), axis=-1)
@@ -241,7 +276,9 @@ class ProspectorParams(object):
         hyper_params = ['sigma_reg', 'tau_eq', 'tau_in', 'sigma_dyn', 'tau_dyn']
         psd_params = np.zeros(len(hyper_params))
         
-        
+        dyn_base_sfh_params = ['zred', 'alpha']
+        dyn_base_params = np.zeros(len(dyn_base_sfh_params))
+
         if any(hp in self.theta_index.keys() for hp in hyper_params):
         
             for i, p in enumerate(hyper_params):
@@ -252,16 +289,42 @@ class ProspectorParams(object):
                     theta[inds] = psd_params[i]
                 else:
                     psd_params[i] = self.config_dict[p]['init']
-                
+            
+            agebins = self.config_dict['agebins']['init']
             sfr_covar_matrix = get_sfr_covar(psd_params, agebins=self.config_dict['agebins']['init'])#, **self.params)
             sfr_ratio_covar_matrix = sfr_covar_to_sfr_ratio_covar(sfr_covar_matrix)
-            logsfr_ratio_prior = priors.MultiVariateNormal(mean=0, Sigma=sfr_ratio_covar_matrix)
+            nbins = len(agebins)
+
+            if ('alpha' in self.theta_index.keys()):
+                for i, p in enumerate(dyn_base_sfh_params):
+                    if self.config_dict[p]['isfree']:
+                        func = self.config_dict[p]['prior'].unit_transform
+                        inds = self.theta_index[p]
+                        dyn_base_params[i] = func(unit_coords[inds])
+                        theta[inds] = dyn_base_params[i]
+                    else:
+                        dyn_base_params[i] = self.config_dict[p]['init']
+                z0, alpha = dyn_base_params[0], dyn_base_params[1]
+                lb_time_z0 = cosmo.lookback_time(z0).value * 1e9
+                bin_lb_times = lb_time_z0 + np.mean(10**agebins, axis=1)
+                zbins = z_at_value(cosmo.lookback_time, bin_lb_times*u.yr)
+                sfr_z = np.exp(-alpha*(zbins - z0)) * (1 + zbins)**(5/2)
+                baseline_sfr_ratios = np.log10(sfr_z[0:-1]/sfr_z[1::])
+            else:
+                p = 'zred'
+                if self.config_dict[p]['isfree']:
+                    func = self.config_dict[p]['prior'].unit_transform
+                    inds = self.theta_index[p]
+                    theta[inds] = func(unit_coords[inds])
+                baseline_sfr_ratios = [0.] * (nbins-1)
+
+            logsfr_ratio_prior = priors.MultiVariateNormal(mean=baseline_sfr_ratios, Sigma=sfr_ratio_covar_matrix)
             x = unit_coords[self.theta_index['logsfr_ratios']]
             logsfr_ratios = logsfr_ratio_prior.unit_transform(x)
             theta[self.theta_index['logsfr_ratios']] = logsfr_ratios
                         
             for k, inds in list(self.theta_index.items()):
-                if (k in hyper_params) or (k == 'logsfr_ratios'):
+                if (k in hyper_params) or (k == 'logsfr_ratios') or (k in dyn_base_sfh_params):
                     continue
                 func = self.config_dict[k]['prior'].unit_transform
                 theta[inds] = func(unit_coords[inds])
